@@ -1,0 +1,629 @@
+/* * *
+
+Uses Arakawa C-grid staggering of variables so that
+h and eta reside at 'cell centers' while potential vorticity 'q'
+lives at cell vertices. u lives at centers of left and right 
+cell edges, while v lives at centers of top and bottom cell edges.
+
+In general, we will define Ny x Nx cell vertices, including ghost-strips
+gives (Ny+2) x (Nx+2) cell vertices. physical values will lie in
+i=1, ..., Nx range while ghost values are at i=0,Nx+1 (j arbitrary)
+j=1, ..., Ny                              &  j=0,Ny+1 (i arbitrary).
+
+For cell-centered variables, physical values will lie in
+i=1, ..., Nx-1 and ghost values are at i=0,Nx (j arbitrary)
+j=1, ..., Ny-1                       & j=0,Ny (i arbitrary).
+
+We will declare all 2D 'field' arrays as having Nx+2 x Ny+2 elements, 
+but cell-centered variables will not use/access i=Nx+1 & j=Ny+1 values.
+
+* * */
+
+ 
+#include <iostream>
+#include <math.h>
+
+#define Lx (4.0e3)
+#define Ly (8.0e3)
+#define Nx (8)
+#define N (Nx+2)
+#define G (9.81)
+#define H0 (10.0)
+#define C0 (sqrt(G*H0))
+#define F (0.0)
+#define FINTIME (3600.0)
+
+#define D (Lx/Nx)
+#define DINV (1.0/D)
+#define Ny ((int)ceil(Ly/D))
+#define M (Ny+2)
+
+using namespace std;
+
+void initialize_H(double (*H)[N], double (*x)[N], double (*y)[N]);
+void make_grid(double (*grid)[N], double start, double end, double Np, int dim);
+void initialize_eta(double (*eta)[N]);
+void print_matrix(double (*dump)[N]);
+void initialize_eta(double (*eta)[N], double (*x)[N], double (*y)[N]);
+void initialize_h(double (*h)[N], double (*x)[N], double (*y)[N], double (*H)[N], double (*eta)[N]);
+void initialize_u(double (*u)[N], double (*x)[N], double (*y)[N], double (*eta)[N]);
+void initialize_v(double (*v)[N], double (*x)[N], double (*y)[N], double (*eta)[N]);
+
+void hgrid_to_ugrid(double (*h)[N], double (*h_u)[N]);
+void hgrid_to_vgrid(double (*h)[N], double (*h_v)[N]);
+void hgrid_to_qgrid(double (*h)[N], double (*h_q)[N]);
+void copy_array(double (*orig)[N], double (*copy)[N]);
+void ghost_u(double (*u)[N]);
+void ghost_v(double (*v)[N]);
+void ghost_q(double (*q)[N]);
+void ghost_E(double (*E)[N]);
+
+int main()
+{
+  
+  double H[M][N];
+
+  //grid for cell vertices
+  double xq[M][N];
+  double yq[M][N];
+
+  //grid for cell centers
+  double xh[M][N];
+  double yh[M][N];
+
+  //grid for u
+  double xu[M][N];
+  double yu[M][N];
+
+  //grid for v
+  double xv[M][N];
+  double yv[M][N];
+
+  //initial fields
+  double eta0[M][N];
+  double u0[M][N];
+  double v0[M][N];
+  double h0[M][N];
+  double zeta[M][N];
+  double q[M][N];
+
+  double eta0_u[M][N];
+  double eta0_v[M][N];
+
+  double h1[M][N];
+  double u1[M][N];
+  double v1[M][N];
+  double eta1[M][N];
+
+  double h2[M][N];
+  double u2[M][N];
+  double v2[M][N];
+  double eta2[M][N];
+
+  double h1_u[M][N];
+  double h1_v[M][N];
+  double h1_q[M][N];
+
+  double u2_h[M][N];
+  double v2_h[M][N];
+
+  double ustar[M][N];
+  double vstar[M][N];
+
+  double RHSmass[M][N];
+  double RHSmomu[M][N];
+  double RHSmomv[M][N];
+
+  double RHSmass0[M][N];
+  double RHSmomu0[M][N];
+  double RHSmomv0[M][N];
+
+  double RHSmass1[M][N];
+  double RHSmomu1[M][N];
+  double RHSmomv1[M][N];
+
+  double epsilon[M][N];
+  double phi[M][N];
+  double alpha[M][N];
+  double beta[M][N];
+  double gamma[M][N];
+  double delta[M][N];
+
+  double Phi[M][N]; //geo-potential
+  double K[M][N];   //kinetic energy
+  double E[M][N];   //total energy
+
+  //time-stepping stuff
+  double dt=0.15*(D/C0);
+  int numsteps = (int) ceil(FINTIME/dt);
+  double t=0;
+
+  make_grid(xq, 0.0, Lx, Nx, 1);
+  make_grid(yq, 0.0, Ly, Ny, 2);
+
+  make_grid(xh, D/2.0, Lx - D/2.0, Nx-1, 1);
+  make_grid(yh, D/2.0, Ly - D/2.0, Ny-1, 2);
+
+  make_grid(xu, 0, Lx, Nx, 1);
+  make_grid(yu, D/2.0, Ly - D/2.0, Ny-1, 2);
+  
+  make_grid(xv, D/2.0, Lx - D/2.0, Nx-1, 1);
+  make_grid(yv, 0, Ly, Ny, 1);
+
+  //get H 
+  initialize_H(H,xh,yh);
+  //get initial eta
+  initialize_eta(eta0,xh,yh);
+  //get initial h (sums H and eta0)
+  initialize_h(h0,xh,yh,H,eta0);
+
+  //interpolate eta0 to u-grid.
+  hgrid_to_ugrid(eta0, eta0_u);
+  //interpolate eta0 to v-grid
+  hgrid_to_vgrid(eta0, eta0_v);
+
+  //get initial u
+  initialize_u(u0,xu,yu,eta0_u);
+  //get initial v
+  initialize_v(v0,xv,yv,eta0_v);
+
+  cout << "Hello World!" << endl;
+  print_matrix(H);
+  print_matrix(xq);
+  print_matrix(yq);
+  print_matrix(xh);
+  print_matrix(yh);
+  print_matrix(eta0);
+  print_matrix(h0);
+
+  //set h1,u1,v1,eta1 to point to h0,u0,v0,eta0
+  copy_array(h0,h1);
+  copy_array(u0,u1);
+  copy_array(v0,v1);
+  copy_array(eta0,eta1);
+  //main time-stepping loop
+  for (int k=1; k <= numsteps; k++)
+  {
+      //interpolate h to u grid
+      hgrid_to_ugrid(h1, h1_u);   
+      //interpolate h to v grid
+      hgrid_to_vgrid(h1, h1_v);
+      //interpolate h to q grid
+      hgrid_to_qgrid(h1, h1_q);
+     
+      //compute relative vorticity (at 'q' points)
+      for (int j=1;j<Ny+1;j++)
+      {
+          for (int i=1; i<Nx+1;i++)
+          {
+              zeta[j][i] = DINV*(u1[j][i]-u1[j+1][i] + v1[j][i+1]-v1[j][i]);
+          }
+      }
+
+      //compute potential vorticity
+      for (int j=1;j<Ny+1;j++)
+      {
+          for (int i=1;i<Nx+1;i++)
+          {
+               q[j][i] = (F+zeta[j][i])/h1_q[j][i];
+          }
+      }
+
+      //form transports
+      for (int j=1;j<Ny+1;j++)
+      {
+          for (int i=1;i<Nx+1;i++)
+          {
+              ustar[j][i] = h1_u[j][i]*u1[j][i];
+              vstar[j][i] = h1_v[j][i]*v1[j][i];
+          }
+      }
+
+      //update ghost strips around ustar and vstar
+      ghost_u(ustar);
+      ghost_v(vstar);
+      //update ghost strips around q
+      ghost_q(q);
+
+      //calculate divergence of (ustar,vstar). Lives at cell- centers
+      //hence only loop over points (i,j)=(1,1),..(Nx-1,Ny-1)
+      for (int j=1; j<Ny; j++)
+      {
+          for (int i=1; i<Nx; i++) 
+          {
+              RHSmass[j][i] = -DINV*(ustar[j][i+1]-ustar[j][i] + 
+                               vstar[j+1][i]-vstar[j][i]);
+          }
+      }
+
+      //calculate coefficients of u in 'u cross omega' terms:
+      for (int j=0; j<Ny+1; j++)
+      {
+          for (int i=0; i<Nx+1; i++)
+          {
+              epsilon[j][i] = (1/24)*(q[j+1][i+1] + q[j+1][i] - q[j][i] - q[j][i+1]);
+              phi[j][i] = (1/24)*(-q[j+1][i+1] + q[j+1][i] + q[j][i] - q[j][i+1]);
+              alpha[j][i] = (1/24)*(2*q[j+1][i+1] + q[j+1][i] + 2*q[j][i] + q[j][i+1]);
+              beta[j][i+1] =(1/24)*(q[j+1][i+1] + 2*q[j+1][i] + q[j][i] + 2*q[j][i+1]);
+              gamma[j][i+1]=(1/24)*(2*q[j+1][i+1] + q[j+1][i] + 2*q[j][i] + q[j][i+1]);
+              delta[j][i]  =(1/24)*(q[j+1][i+1] + 2*q[j+1][i] + q[j][i] + 2*q[j][i+1]);
+          }
+      }
+
+      //Calculate geo-potential, lives on h-grid (cell centers)
+      for (int j=1; j<Ny; j++)
+      {
+          for (int i=1; i<Nx; i++)
+          {
+              Phi[j][i] = G*eta1[j][i];
+          }
+      }
+
+      //interpolate v^2 to h-grid
+      for (int j=1; j<Ny; j++)
+      {
+          for(int i=1; i<Nx; i++)
+          {
+              v2_h[j][i] = 0.5*(v1[j][i]*v1[j][i] + v1[j+1][i]*v1[j+1][i]);
+          }
+      }
+
+      //interpolate u^2 to h-grid
+      for (int j=1; j<Ny; j++)
+      {
+          for(int i=1; i<Nx; i++)
+          {
+              u2_h[j][i] = 0.5*(u1[j][i]*u1[j][i] + u1[j][i+1]*u1[j][i+1]);
+          }
+      }
+
+      //form kinetic energy on h-grid
+      for (int j=1; j<Ny; j++)
+      {
+          for (int i=1; i<Nx; i++)
+          {
+              K[j][i] = 0.5*(u2_h[j][i] + v2_h[j][i]);
+          }
+      }
+
+      //Calculate total energy on h-grid
+      for (int j=1; j<Ny; j++)
+      {
+          for (int i=1; i<Nx; i++) 
+          {
+              E[j][i] = K[j][i] + Phi[j][i];
+          }
+      }
+
+      //update ghost-strips around E
+      ghost_E(E);
+
+      //Calculate FD approximation to RHS of u momentum equation:
+      for (int j=1; j<Ny; j++)
+      {
+          for (int i=1; i<Nx+1; i++)
+          {
+              //check if this should be j not j+1
+              RHSmomu[j][i] = alpha[j+1][i+1]*vstar[j+2][i+1] + beta[j+1][i+1]*vstar[j+2][i]
+                            + gamma[j+1][i+1]*vstar[j+1][i]   -delta[j+1][i+1]*vstar[j+1][i+1]
+                            -epsilon[j+1][i+1]*ustar[j+1][i+2] +epsilon[j+1][i]*ustar[j+1][i]
+                            -DINV*(E[j+1][i+1] - E[j+1][i]);  
+          }
+      }
+
+      //Calculate FD approximation to RHS of v momentum equation:
+      for (int j=1; j<Ny+1; j++)
+      {
+          for (int i=1; i<Nx; i++)
+          {
+              RHSmomv[j][i] =-gamma[j+1][i+2]*ustar[j+1][i+2] - delta[j+1][i+1]*ustar[j+1][i+1]
+                             -alpha[j][i+1]*ustar[j][i+1] - beta[j][i+2]*ustar[j][i+2]
+                             -phi[j+1][i+1]*vstar[j+2][i+1] + phi[j][i+1]*vstar[j][i+1]
+                             -DINV*(E[j+1][i+1] - E[j][i+1]);
+          }
+      }
+
+      //time-step all equations
+      if (k==1) {
+          //Forward Euler
+          for (int j=1; j<Ny+1; j++) 
+          {
+              for (int i=1; i<Nx+1; i++)
+              {
+                  h1[j][i] = h0[j][i] + dt*RHSmass[j][i];
+                  u1[j][i] = u0[j][i] + dt*RHSmomu[j][i];
+                  v1[j][i] = v0[j][i] + dt*RHSmomv[j][i];
+                  eta1[j][i] = h1[j][i] - H[j][i];
+              }
+          }
+
+          //cycle fields for next time-step
+          copy_array(RHSmass, RHSmass0);
+          copy_array(RHSmomu, RHSmomu0);
+          copy_array(RHSmomv, RHSmomv0);
+          copy_array(eta1, eta0);
+          copy_array(h1, h0);
+          copy_array(u1, u0);
+          copy_array(v1, v0);
+      }
+      else {
+          //2nd Order Adams-Bashforth
+          copy_array(RHSmass,RHSmass1);
+          copy_array(RHSmomu,RHSmomu1);
+          copy_array(RHSmomv,RHSmomv1);
+
+          for (int j=1; j<Ny+1; j++)
+          {
+              for(int i=1; i<Nx+1; i++)
+              {
+                  h2[j][i] = h1[j][i] + dt*(1.5*RHSmass1[j][i] - 0.5*RHSmass0[j][i]);
+                  u2[j][i] = u1[j][i] + dt*(1.5*RHSmomu1[j][i] - 0.5*RHSmomu0[j][i]);
+                  v2[j][i] = v1[j][i] + dt*(1.5*RHSmomv1[j][i] - 0.5*RHSmomv0[j][i]);
+                  eta2[j][i] = h2[j][i] - H[j][i];   
+              }
+          }
+
+          //cycle fields for next time-step
+          copy_array(eta1, eta0);
+          copy_array(eta2, eta1);
+          copy_array(h1, h0);
+          copy_array(h2, h1);
+          copy_array(u1, u0);
+          copy_array(u2, u1);
+          copy_array(v1, v0);
+          copy_array(v2, v1);
+          copy_array(RHSmass1, RHSmass0);
+          copy_array(RHSmomu1, RHSmomu0);
+          copy_array(RHSmomv1, RHSmomv1);
+      }
+
+  } //end main time-stepping loop
+
+  return 0;
+}
+
+void ghost_E(double (*E)[N])
+{
+    for (int i=1;i<Nx;i++)
+    {
+        E[0][i] = E[1][i];
+        E[Ny][i] = E[Ny-1][i];
+    }
+    for (int j=1;j<Ny;j++)
+    {
+        E[j][0] = E[j][1];
+        E[j][Nx] = E[j][Nx-1];
+    }
+
+    //TODO: stuff with corners
+    return;
+}
+
+void ghost_q(double (*q)[N])
+{
+    for (int i=1;i<Nx+1;i++)
+    {
+        q[0][i] = q[1][i];
+        q[Ny+1][i] = q[Ny][i];
+    }
+    for (int j=1;j<Ny+1;j++)
+    {
+        q[j][0] = q[j][1];
+        q[j][Nx+1] = q[j][Nx];
+    }
+
+    //TODO: stuff with corners
+    return;
+}
+
+void ghost_v(double (*v)[N])
+{
+
+    //reverse flow in ghost cells
+    for (int i=1;i<Nx+1;i++)
+    {
+        v[0][i] = -v[1][i];
+        v[Ny+1][i] = -v[Ny][i];
+    }
+
+    //put stuff in other cells
+    for (int j=1;j<Ny+1;j++)
+    {
+        v[j][0] = v[j][1];
+        v[j][Nx] = v[j][Nx-1];
+    }
+
+    //TODO: do stuff to corners.
+
+    return;
+}
+
+void ghost_u(double (*u)[N])
+{
+    //reverse x-direction flow in ghost cells.
+    for (int j=1;j<Ny+1;j++)
+    {
+        u[j][0] = -u[j][1];
+        u[j][Nx+1] = -u[j][Nx];
+    }
+
+    //put stuff in other cells.
+    for (int i=1;i<Nx+1;i++)
+    {
+        u[0][i] = u[1][i];
+        u[Ny][i] = u[Ny-1][i];
+    }
+
+    //TODO: do stuff to corners.
+
+    return;
+}
+
+void initialize_H(double (*H)[N], double (*x)[N], double (*y)[N])
+{
+    //In this case I assign all values (including ghost points)
+    // to be constant
+    for (int i=0;i<Nx+1;i++) 
+    {
+        for (int j=0;j<Ny+1;j++) 
+        {
+            H[j][i]=H0;
+        }
+    }
+    return;
+}
+
+void initialize_eta(double (*eta)[N], double (*x)[N], double (*y)[N])
+{
+    for(int j=1; j<Ny; j++)
+    {
+        for(int i=1; i<Nx; i++)
+        {
+            eta[j][i] = .05*exp(-((x[j][i]-0.55*Lx)/300)*((x[j][i]-0.55*Lx)/300) - ((y[j][i]-0.5*Ly)/300)*((y[j][i]-0.5*Ly)/300));;
+        }
+    }
+
+    //initialize ghost-strips
+    for(int i=1; i<Nx; i++)
+    {
+        eta[0][i] = eta[1][i];
+        eta[Ny][i] = eta[Ny-1][i];
+    }
+    for(int j=1;j<Ny; j++)
+    {
+       eta[j][0] = eta[j][1];
+       eta[j][Nx] = eta[j][Nx-1];
+    }
+
+    //deal with corners whose only neighbours are other ghost-points.
+    //actually, we can probably leave these alone. I doubt they are
+    //ever accessed.
+    eta[0][0] = eta[0][1];
+    eta[0][Nx] = eta[0][Nx-1];
+    eta[Ny][0] = eta[Ny][1];
+    eta[Ny][Nx] = eta[Ny][Nx-1];
+
+    return;
+}
+
+void initialize_h(double (*h)[N], double (*x)[N], double (*y)[N], double (*H)[N], double (*eta)[N])
+{
+    //assumes eta and H have been initilized with ghost-strips
+    for (int j=0; j<Ny+1; j++)
+    {
+        for (int i=0; i<Nx+1; i++)
+        {
+            h[j][i] = H[j][i] + eta[j][i];
+        }
+    }
+    return;
+}
+void initialize_u(double (*u)[N], double (*x)[N], double (*y)[N], double (*eta_u)[N])
+{
+    //This presumes that eta_u is on the u-grid.
+    for(int j=1; j<Ny; j++)
+    {
+        for(int i=1; i<Nx+1; i++)
+        {
+            u[j][i] = -sqrt(G/H0)*eta_u[j][i];
+        }
+    }
+    return;
+}
+
+void initialize_v(double (*v)[N], double(*x)[N], double (*y)[N], double (*eta)[N])
+{
+    return;
+}
+
+void make_grid(double (*grid)[N], double start, double end, double Np, int dim)
+{
+   double d = (end-start)/Np;
+   if (dim == 1){
+       for (int j=1; j<Ny+1; j++)
+       {
+           for(int i=1;i<Nx+1; i++) //or i<Np
+           {
+               grid[j][i] = start+i*d;
+           } 
+       }
+   }
+   else if (dim ==2){
+       for (int i=1; i<Nx+1; i++)
+       {
+           for (int j=1;j<Ny+1; j++) //or j<Np
+           {
+               grid[j][i] = start+j*d;
+           }
+       }
+   }
+
+   return;
+}
+
+void hgrid_to_ugrid(double (*h)[N], double (*h_u)[N])
+{
+    //this will make use of the ghost points
+    //h[j][0] and h[j][Nx] (j=1,...,Ny)
+    for(int i=1;i<Nx+1;i++)
+    {
+        for(int j=1;j<Ny+1;j++)
+        {
+            h_u[j][i]=0.5*(h[j][i-1] + h[j][i]);
+        }
+    }
+
+    return;
+}
+
+void hgrid_to_vgrid(double (*h)[N], double (*h_v)[N])
+{
+    //this will make use of the ghost points
+    //h[0][i] and h[Ny][i] (i=1,..Nx)
+    for(int i=1;i<Nx+1;i++)
+    {
+        for(int j=1;j<Ny+1;j++)
+        {
+            h_v[j][i]=0.5*(h[j-1][i] + h[j][i]);
+        }
+    }
+ 
+    return;
+}
+
+void hgrid_to_qgrid(double (*h)[N], double (*h_q)[N])
+{
+    for(int i=1;i<Nx+1;i++)
+    {
+        for(int j=1;j<Ny+1; j++)
+        {
+             h_q[j][i]=0.25*(h[j-1][i-1] + h[j-1][i] + h[j][i-1] + h[j][i]);
+        }
+    }
+    return;   
+}
+
+void copy_array(double (*orig)[N], double (*copy)[N])
+{
+    for(int i=0; i<Nx+2; i++)
+    {
+        for(int j=0; j<Ny+2; j++)
+        {
+            copy[j][i] = orig[j][i];
+        } 
+    }
+
+    return;
+}
+
+void print_matrix(double (*dump)[N])
+{
+    for (int j=1; j<Ny+1;j++) 
+    {
+        for(int i=1;i<Nx+1;i++)
+        {
+            cout << dump[j][i] << " ";
+        }
+        cout << endl;
+    }
+}
